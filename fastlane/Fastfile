@@ -1,0 +1,150 @@
+# This file contains the fastlane.tools configuration
+# You can find the documentation at https://docs.fastlane.tools
+#
+# For a list of all available actions, check out
+#     https://docs.fastlane.tools/actions
+#
+# For a list of all available plugins, check out
+#     https://docs.fastlane.tools/plugins/available-plugins
+
+# Uncomment the line if you want fastlane to automatically update itself
+# update_fastlane
+
+default_platform(:ios)
+
+platform :ios do
+  desc "Build and upload to TestFlight"
+  lane :beta do
+    # Ensure no uncommited changes
+    ensure_git_status_clean
+
+    # Run tests
+    run_tests(
+      scheme: "Thunderbird",
+      workspace: "../Thunderbird.xcworkspace",
+      device: "iPhone 15 Pro",
+      code_coverage: true
+    )
+
+    # Set version if provided via workflow input
+    if ENV["VERSION_INPUT"] && !ENV["VERSION_INPUT"].empty?
+      puts "Setting version to: #{ENV['VERSION_INPUT']}"
+      increment_version_number(
+        version_number: ENV["VERSION_INPUT"],
+        xcodeproj: "../Thunderbird/Thunderbird.xcodeproj"
+      )
+    end
+
+    # Increment build number automatically
+    increment_build_number(
+      xcodeproj: "../Thunderbird/Thunderbird.xcodeproj"
+    )
+
+    # Build the app
+    build_app(
+      scheme: "Thunderbird",
+      workspace: "../Thunderbird.xcworkspace",
+      export_method: "app-store",
+      export_options: {
+        method: "app-store",
+        teamID: ENV["APPLE_TEAM_ID"],
+        provisioningProfiles: {
+          "net.thunderbird.ios" => "Thunderbird"
+        },
+        signingStyle: "manual",
+        uploadBitcode: false,
+        uploadSymbols: true,
+        compileBitcode: false
+      }
+    )
+
+    # Upload to TestFlight
+    upload_to_testflight(
+      api_key_path: "AuthKey_#{ENV['APP_STORE_CONNECT_API_KEY_ID']}.p8",
+      skip_waiting_for_build_processing: true,
+      skip_submission: true,
+      distribute_external: ENV["NOTIFY_TESTERS"] == "true",
+      notify_external_testers: ENV["NOTIFY_TESTERS"] == "true",
+      changelog: "Automated build from GitHub Actions"
+    )
+
+    puts "Successfully uploaded to TestFlight!"
+  end
+
+  desc "Test build without signing"
+  lane :test_build do
+    build_app(
+      scheme: "Thunderbird",
+      workspace: "../Thunderbird.xcworkspace",
+      configuration: "Release",
+      skip_codesigning: true,
+      skip_archive: true,
+      destination: "generic/platform=iOS"
+    )
+  end
+
+  desc "Build for App Store release"
+  lane :release do
+    # Ensure no uncommited changes
+    ensure_git_status_clean
+
+    # Run tests
+    run_tests(
+      scheme: "Thunderbird",
+      workspace: "../Thunderbird.xcworkspace",
+      device: "iPhone 15 Pro",
+      code_coverage: true
+    )
+
+    # Add version management
+    if ENV["VERSION_INPUT"] && !ENV["VERSION_INPUT"].empty?
+      puts "Setting version to: #{ENV['VERSION_INPUT']}"
+      increment_version_number(
+        version_number: ENV["VERSION_INPUT"],
+        xcodeproj: "../Thunderbird/Thunderbird.xcodeproj"
+      )
+    end
+
+    increment_build_number(
+      xcodeproj: "../Thunderbird/Thunderbird.xcodeproj"
+    )
+
+    # Build the app
+    build_app(
+      scheme: "Thunderbird",
+      workspace: "../Thunderbird.xcworkspace",
+      export_method: "app-store",
+      export_options: {
+        method: "app-store",
+        teamID: ENV["APPLE_TEAM_ID"],
+        provisioningProfiles: {
+          "net.thunderbird.ios" => "Thunderbird"
+        },
+        signingStyle: "manual",
+        uploadBitcode: false,
+        uploadSymbols: true,
+        compileBitcode: false
+      }
+    )
+
+    # Upload to App Store Connect for review
+    upload_to_app_store(
+      api_key_path: "AuthKey_#{ENV['APP_STORE_CONNECT_API_KEY_ID']}.p8",
+      force: true,
+      reject_if_possible: true,
+      skip_metadata: false,
+      skip_screenshots: false,
+      submit_for_review: false
+    )
+
+    puts "Successfully uploaded to App Store Connect!"
+  end
+
+  # Error handling
+  error do |lane, exception|
+    # slack(
+    #   message: "Error occurred in lane #{lane}: #{exception}",
+    #   success: false
+    # )
+  end
+end

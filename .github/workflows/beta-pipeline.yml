@@ -1,0 +1,13 @@
+name: Beta Pipeline
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  id-token: write
+
+jobs:
+  call-shippable-builds:
+    uses: coreycb/thunderbird-ios/.github/workflows/shippable-builds.yml@beta

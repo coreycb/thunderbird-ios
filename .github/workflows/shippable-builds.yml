@@ -1,0 +1,166 @@
+name: Shippable Builds
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: 'Version to build (optional)'
+        required: false
+        default: "1.0"
+        type: string
+      notify_testers:
+        description: 'Notify external testers'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build_and_deploy_ios:
+    runs-on: macos-14
+    environment: thunderbird_release
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@692973e3d937129bcbf40652eb9f2f61becf3332 # v4.1.7
+
+      - name: Xcode Select Version
+        uses: mobiledevops/xcode-select-version-action@a58204ef24b6e61857940e51c0e11b0368065b94 # v1
+        with:
+          xcode-select-version: '16.2'
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@cf7216d52fba1017929b4d7162fabe2b30af5b49 # v1.262.0
+        with:
+          ruby-version: '3.0'
+          bundler-cache: true
+          working-directory: fastlane
+
+      - name: Install Fastlane
+        working-directory: fastlane
+        run: |
+          bundle install
+
+      - name: Setup Apple certificates
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          if [ -z "$APPLE_CERTIFICATE_P12" ] || [ -z "$APPLE_CERTIFICATE_PASSWORD" ]; then
+            echo "Certificate secrets are not set"
+            exit 1
+          fi
+
+          # Decode and install certificate
+          CLEAN_CERT=$(echo "$APPLE_CERTIFICATE_P12" | tr -d '\n\r\t ' | tr -d '[:space:]')
+          echo "$CLEAN_CERT" | base64 --decode > certificate.p12
+
+          if [ ! -s certificate.p12 ]; then
+            echo "Failed to decode certificate"
+            exit 1
+          fi
+
+          # Create temporary keychain
+          security create-keychain -p "temp-keychain-password" build.keychain
+          security set-keychain-settings -lut 21600 build.keychain
+          security unlock-keychain -p "temp-keychain-password" build.keychain
+          security list-keychains -d user -s build.keychain login.keychain
+
+          # Import certificate directly
+          security import certificate.p12 -k build.keychain -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "temp-keychain-password" build.keychain
+
+          # Clean up certificate file
+          rm certificate.p12
+
+          echo "Certificate installed successfully"
+
+      - name: Setup provisioning profiles
+        env:
+          PROVISIONING_PROFILE: ${{ secrets.APP_STORE_PROVISIONING_PROFILE }}
+        run: |
+          if [ -z "$PROVISIONING_PROFILE" ]; then
+            echo "Provisioning profile secret is not set"
+            exit 1
+          fi
+
+          # Create provisioning profiles directory
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+
+          # Install provisioning profile
+          echo "$PROVISIONING_PROFILE" | base64 --decode > profile.mobileprovision
+
+          if [ ! -s profile.mobileprovision ]; then
+            echo "Failed to decode provisioning profile"
+            exit 1
+          fi
+
+          # Extract profile info
+          PROFILE_UUID=$(security cms -D -i profile.mobileprovision | plutil -extract UUID raw -)
+          PROFILE_NAME=$(security cms -D -i profile.mobileprovision | plutil -extract Name raw -)
+
+          # Install profile
+          cp profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/"$PROFILE_UUID".mobileprovision
+
+          # Export for later use
+          echo "PROVISIONING_PROFILE_NAME=$PROFILE_NAME" >> $GITHUB_ENV
+          echo "PROVISIONING_PROFILE_UUID=$PROFILE_UUID" >> $GITHUB_ENV
+
+          # Clean up profile file
+          rm profile.mobileprovision
+
+          echo "Provisioning profile installed: $PROFILE_NAME"
+
+      - name: Setup App Store Connect API Key
+        working-directory: fastlane
+        env:
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+        run: |
+          # Decode API key (try base64 first, fallback to raw)
+          if echo "$APP_STORE_CONNECT_API_KEY" | base64 --decode > AuthKey_$APP_STORE_CONNECT_API_KEY_ID.p8 2>/dev/null; then
+            echo "Decoded base64 API key"
+          else
+            echo "$APP_STORE_CONNECT_API_KEY" > AuthKey_$APP_STORE_CONNECT_API_KEY_ID.p8
+          fi
+
+      - name: Resolve Package Dependencies
+        run: |
+          xcodebuild -resolvePackageDependencies -workspace Thunderbird.xcworkspace -scheme Thunderbird
+
+      - name: Build and Deploy to TestFlight
+        working-directory: fastlane
+        env:
+          CI: true
+          APP_STORE_CONNECT_API_KEY_ID: ${{ secrets.APP_STORE_CONNECT_API_KEY_ID }}
+          APP_STORE_CONNECT_ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          VERSION_INPUT: ${{ inputs.version }}
+          NOTIFY_TESTERS: ${{ inputs.notify_testers }}
+        run: |
+          bundle exec fastlane beta
+
+      - name: Upload build artifacts (if build fails)
+        if: failure()
+        uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: ios-build-logs-${{ github.run_id }}
+          path: |
+            fastlane/logs/
+            ~/Library/Logs/gym/
+          retention-days: 7
+
+      - name: Clean up sensitive files
+        if: always()
+        run: |
+          rm -f fastlane/AuthKey_*.p8
+          rm -f profile.mobileprovision
+          rm -f ~/Library/MobileDevice/Provisioning\ Profiles/*.mobileprovision
+          rm -f certificate.p12
+          if security list-keychains | grep -q "build.keychain"; then
+            security delete-keychain build.keychain
+          fi
+
