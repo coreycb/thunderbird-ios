@@ -1,6 +1,8 @@
 name: Security - CodeQL
 
 on:
+  push:
+    branches: ["codeql"]
   schedule:
     - cron: "15 4 * * 4"
 
